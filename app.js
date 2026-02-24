@@ -10,7 +10,7 @@ const REVIEW_WINDOWS = [9, 18]; // 9am and 6pm (24h)
 const addDays = (d, n) => new Date(d.getTime() + n * 864e5);
 const fmtDate = d => d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 const fmtShort = d => new Date(d).toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
-const fmtDateTime = d => d.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
+const fmtDateTime = d => d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
 function relDays(d) {
   const diff = Math.round((d - Date.now()) / 864e5);
@@ -27,41 +27,30 @@ function fmtDays(d) {
 }
 
 // ── SRS intervals ──────────────────────────────────────────────────────────
-// Hours to next review per stage (0-indexed: stage 0 = Apprentice 1)
 const SRS_INTERVALS_H = [4, 8, 23, 47, 167, 335, 719, 2879];
 
-// Given a date/time when an item becomes available, find the next
-// review window (9am or 6pm) on or after that time.
 function nextWindow(availableAt) {
   const d = new Date(availableAt);
-  const hours = REVIEW_WINDOWS;
-
-  // Try same day windows first, then next days
   for (let dayOffset = 0; dayOffset <= 14; dayOffset++) {
-    const candidate = new Date(d);
-    candidate.setDate(candidate.getDate() + dayOffset);
-    for (const h of hours) {
+    for (const h of REVIEW_WINDOWS) {
+      const candidate = new Date(d);
+      candidate.setDate(candidate.getDate() + dayOffset);
       candidate.setHours(h, 0, 0, 0);
       if (candidate > d) return new Date(candidate);
     }
   }
-  return d; // fallback
+  return d;
 }
 
-// Simulate an item through the SRS from its current stage until Guru (stage 4)
-// Returns the date it reaches Guru given window-based reviews
 function simulateToGuru(startDate, currentStage) {
   let reviewDate = new Date(startDate);
   let stage = currentStage;
-
   while (stage < 4) {
-    // Item becomes available after interval
     const availableAt = new Date(reviewDate.getTime() + SRS_INTERVALS_H[stage] * 3600000);
-    // Next window on or after available time
     reviewDate = nextWindow(availableAt);
     stage++;
   }
-  return reviewDate; // date when item reaches Guru
+  return reviewDate;
 }
 
 // ── stats computation ──────────────────────────────────────────────────────
@@ -108,99 +97,75 @@ function computeStats(progressions, currentLevel) {
 }
 
 // ── window-based level time ────────────────────────────────────────────────
-// Calculate how many days a level takes if you do reviews at 9am and 6pm only.
-// Simulates the critical path: radicals → Guru, then kanji → Guru (90% needed).
 function calcWindowLevelDays(lessonTime) {
-  // Simulate a radical going from lesson → Guru at window-based reviews
-  // Stage 0 = just learned (Apprentice 1)
   const radicalGuruDate = simulateToGuru(lessonTime, 0);
+  const kanjiGuruDate   = simulateToGuru(radicalGuruDate, 0);
+  const days = (kanjiGuruDate - lessonTime) / 864e5;
+  return { days, levelUpDate: kanjiGuruDate };
+}
 
-  // Kanji unlocked after radicals Guru. Simulate kanji from that point.
-  const kanjiGuruDate = simulateToGuru(radicalGuruDate, 0);
-
-  // Level-up happens when 90% of kanji reach Guru.
-  // The last kanji to Guru determines level-up time.
-  // Simplification: use the single-path simulation as the critical path.
-  const levelUpDate = kanjiGuruDate;
-  const days = (levelUpDate - lessonTime) / 864e5;
-  return { days, levelUpDate };
+function calcWindowRoadTo60() {
+  const left = 60 - _currentLevel;
+  const firstLesson = nextWindow(new Date());
+  const { days: windowDaysPerLevel } = calcWindowLevelDays(firstLesson);
+  const windowDate = addDays(new Date(), left * windowDaysPerLevel);
+  return { windowDaysPerLevel, windowDate };
 }
 
 // ── next level prediction ──────────────────────────────────────────────────
 function computeNextLevel(assignments) {
   const now = new Date();
 
-  // Filter to current level radicals and kanji in Apprentice stages (0-3)
   const blocking = assignments.filter(a => {
     const d = a.data;
     return (d.subject_type === 'radical' || d.subject_type === 'kanji') &&
-           d.srs_stage < 4 && // not yet Guru
+           d.srs_stage < 4 &&
            !d.burned_at &&
-           d.started_at; // has been started (not just available)
+           d.started_at;
   });
 
   if (blocking.length === 0) {
-    // All radicals/kanji are Guru+ — level up is imminent (just needs review session)
     return {
       levelUpDate: nextWindow(now),
       blockingCount: 0,
-      criticalItem: null,
+      imminent: true,
+      stageBreakdown: []
     };
   }
 
-  // For each blocking item, simulate when it reaches Guru
   const guruDates = blocking.map(a => {
     const d = a.data;
-    const stage = d.srs_stage; // 0=App1, 1=App2, 2=App3, 3=App4
-    // Available at = when the next review is due
+    const stage = d.srs_stage;
     const availableAt = d.available_at ? new Date(d.available_at) : now;
-    // If already available, use now
     const startFrom = availableAt <= now ? now : availableAt;
-    // Simulate from current stage (already at this stage, just needs review)
     const guruDate = simulateToGuru(startFrom, stage);
     return { guruDate, stage, type: d.subject_type, availableAt };
   });
 
-  // Sort by guru date descending — the last item to Guru determines level-up
   guruDates.sort((a, b) => b.guruDate - a.guruDate);
 
-  // Level-up needs 90% of kanji at Guru. Find the date when 90% are done.
   const kanjiItems = guruDates.filter(g => g.type === 'kanji');
-  const radicalItems = guruDates.filter(g => g.type === 'radical');
 
   let levelUpDate;
   if (kanjiItems.length > 0) {
-    // 90th percentile of kanji guru dates
-    const idx = Math.floor(kanjiItems.length * 0.1); // 10% from end = 90th percentile
     const sortedKanji = [...kanjiItems].sort((a, b) => a.guruDate - b.guruDate);
-    levelUpDate = sortedKanji[Math.max(0, sortedKanji.length - 1 - idx)].guruDate;
+    const idx = Math.max(0, sortedKanji.length - 1 - Math.floor(sortedKanji.length * 0.1));
+    levelUpDate = sortedKanji[idx].guruDate;
   } else {
-    // Only radicals blocking — use last radical
     levelUpDate = guruDates[0].guruDate;
   }
-
-  const criticalItem = guruDates[0]; // slowest item
 
   return {
     levelUpDate,
     blockingCount: blocking.length,
-    criticalItem,
-    stageBreakdown: [0,1,2,3].map(s => ({
+    imminent: false,
+    criticalItem: guruDates[0],
+    stageBreakdown: [0, 1, 2, 3].map(s => ({
       stage: s,
       count: blocking.filter(a => a.data.srs_stage === s).length,
-      label: ['App 1','App 2','App 3','App 4'][s]
+      label: ['App 1', 'App 2', 'App 3', 'App 4'][s]
     })).filter(s => s.count > 0)
   };
-}
-
-// ── window-based road to 60 ────────────────────────────────────────────────
-function calcWindowRoadTo60() {
-  const left = 60 - _currentLevel;
-  // Use next 9am as the start of each level (lesson time)
-  const firstLesson = nextWindow(new Date());
-  const { days: windowDaysPerLevel } = calcWindowLevelDays(firstLesson);
-  const windowDate = addDays(new Date(), left * windowDaysPerLevel);
-  return { windowDaysPerLevel, windowDate };
 }
 
 // ── speedup analysis ───────────────────────────────────────────────────────
@@ -219,67 +184,85 @@ function computeSpeedup(reviewStats) {
   const extraHoursPerLevel = incorrectRate * estReviewsPerLevel * avgIntervalHours;
   const extraDaysPerLevel  = extraHoursPerLevel / 24;
 
-  const windowLostPerLevel = Math.max(0, _stats.median - calcWindowRoadTo60().windowDaysPerLevel);
+  const { windowDaysPerLevel } = calcWindowRoadTo60();
+  const windowLostPerLevel = Math.max(0, (_stats?.median || 0) - windowDaysPerLevel);
 
-  return {
-    accuracy, total, incorrect, extraDaysPerLevel, windowLostPerLevel,
-  };
+  return { accuracy, total, incorrect, extraDaysPerLevel, windowLostPerLevel };
 }
 
 // ── render next level ──────────────────────────────────────────────────────
 function renderNextLevel(nextLevel) {
-  const { levelUpDate, blockingCount, criticalItem, stageBreakdown } = nextLevel;
+  const { levelUpDate, blockingCount, imminent, criticalItem, stageBreakdown } = nextLevel;
   const now = new Date();
-  const daysUntil = (levelUpDate - now) / 864e5;
+  const daysUntil = Math.max(0, (levelUpDate - now) / 864e5);
 
-  const stageHtml = stageBreakdown ? stageBreakdown.map(s => `
-    <div class="stage-pip">
-      <div class="stage-pip-count">${s.count}</div>
-      <div class="stage-pip-label">${s.label}</div>
-    </div>
-  `).join('') : '';
+  const stageHtml = stageBreakdown && stageBreakdown.length
+    ? stageBreakdown.map(s => `
+        <div class="stage-pip">
+          <div class="stage-pip-count">${s.count}</div>
+          <div class="stage-pip-label">${s.label}</div>
+        </div>`).join('')
+    : '';
 
-  document.getElementById('next-level-content').innerHTML = `
-    <div class="next-level-grid">
-      <div class="next-level-date">
-        <div class="proj-label">Level ${_currentLevel + 1} unlocks</div>
-        <div class="next-date-big">${fmtDateTime(levelUpDate)}</div>
-        <div class="proj-rel">${fmtDays(Math.max(0, daysUntil))} from now</div>
-      </div>
-      <div class="next-level-meta">
+  const mainContent = imminent
+    ? `<div class="next-level-imminent">
+        <div class="imminent-badge">⚡ Level up ready</div>
+        <p style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.6">
+          All your radicals and kanji are at Guru or above.
+          Your next level-up is available at your next review session.
+        </p>
         <div class="insight-row">
-          <span class="insight-row-label">Items still blocking level-up</span>
-          <span class="insight-row-val ${blockingCount > 20 ? 'bad' : blockingCount > 5 ? 'warn' : 'good'}">${blockingCount}</span>
+          <span class="insight-row-label">Next review window</span>
+          <span class="insight-row-val good">${fmtDateTime(levelUpDate)}</span>
         </div>
-        ${stageBreakdown && stageBreakdown.length ? `
-        <div class="insight-row" style="align-items:center">
-          <span class="insight-row-label">Breakdown by SRS stage</span>
-          <div class="stage-pips">${stageHtml}</div>
-        </div>` : ''}
-        ${criticalItem ? `
-        <div class="insight-row">
-          <span class="insight-row-label">Slowest item reaches Guru</span>
-          <span class="insight-row-val warn">${fmtDateTime(criticalItem.guruDate)}</span>
-        </div>` : ''}
-        <div class="insight-row">
-          <span class="insight-row-label">Based on review windows</span>
-          <span class="insight-row-val" style="font-size:12px;font-family:'DM Mono',monospace">${REVIEW_WINDOWS.map(h => `${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`).join(' & ')}</span>
+      </div>`
+    : `<div class="next-level-grid">
+        <div class="next-level-date">
+          <div class="proj-label">Level ${_currentLevel + 1} unlocks around</div>
+          <div class="next-date-big">${fmtDateTime(levelUpDate)}</div>
+          <div class="proj-rel" style="margin-top:6px">
+            ${daysUntil < 1
+              ? `<span style="color:#4a7c59;font-weight:600">${fmtDays(daysUntil)} from now</span>`
+              : `<span>${fmtDays(daysUntil)} from now</span>`}
+          </div>
+        </div>
+        <div class="next-level-meta">
+          <div class="insight-row">
+            <span class="insight-row-label">Items blocking level-up</span>
+            <span class="insight-row-val ${blockingCount > 20 ? 'bad' : blockingCount > 5 ? 'warn' : 'good'}">${blockingCount}</span>
+          </div>
+          ${stageHtml ? `
+          <div class="insight-row" style="align-items:center">
+            <span class="insight-row-label">By SRS stage</span>
+            <div class="stage-pips">${stageHtml}</div>
+          </div>` : ''}
+          ${criticalItem ? `
+          <div class="insight-row">
+            <span class="insight-row-label">Last item hits Guru</span>
+            <span class="insight-row-val warn">${fmtDateTime(criticalItem.guruDate)}</span>
+          </div>` : ''}
+          <div class="insight-row">
+            <span class="insight-row-label">Review windows used</span>
+            <span class="insight-row-val" style="font-size:12px;font-family:'DM Mono',monospace">
+              ${REVIEW_WINDOWS.map(h => `${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`).join(' & ')}
+            </span>
+          </div>
         </div>
       </div>
-    </div>
-    <div class="lever-tip">
-      💡 This assumes you do your reviews at every ${REVIEW_WINDOWS.map(h => `${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`).join(' and ')} window without missing any.
-      Missing even one window pushes this date back by hours.
-    </div>
-  `;
+      <div class="lever-tip" style="margin-top:16px">
+        💡 ${daysUntil < 2
+          ? `You're close! Don't miss your next review window — one missed slot pushes this back by hours.`
+          : `You have ${blockingCount} items still working through the SRS. Stay consistent with your 9am and 6pm windows.`}
+      </div>`;
 
+  document.getElementById('next-level-content').innerHTML = mainContent;
   document.getElementById('next-level-section').style.display = 'block';
 }
 
 // ── render speedup ─────────────────────────────────────────────────────────
 function renderSpeedup(speedup) {
   const left = 60 - _currentLevel;
-  const currentDate  = addDays(new Date(), left * _stats.median);
+  const currentDate = addDays(new Date(), left * _stats.median);
   const { windowDaysPerLevel, windowDate } = calcWindowRoadTo60();
   const noMistakeDate = addDays(new Date(), left * Math.max(windowDaysPerLevel, _stats.median - speedup.extraDaysPerLevel));
 
@@ -438,9 +421,9 @@ async function fetchWK(token) {
     url = j.pages?.next_url || null;
   }
 
-  // Review stats filtered to current run levels only — single fast request
   const currentLevel = user.data.current_level;
   const levelNums = Array.from({ length: currentLevel }, (_, i) => i + 1).join(',');
+
   setLoadingMsg('Fetching review statistics...');
   const rsRes = await fetch(
     `https://api.wanikani.com/v2/review_statistics?levels=${levelNums}`,
@@ -459,7 +442,6 @@ async function fetchWK(token) {
     }
   }
 
-  // Assignments for current level — to predict next level-up
   setLoadingMsg('Fetching current assignments...');
   const aRes = await fetch(
     `https://api.wanikani.com/v2/assignments?levels=${currentLevel}&started=true`,
@@ -514,9 +496,8 @@ function getDemoData() {
       }
     });
   }
-  // Fake assignments — mix of stages blocking level-up
   const assignments = [];
-  const types = ['radical','radical','kanji','kanji','kanji','kanji','kanji'];
+  const types = ['radical', 'radical', 'kanji', 'kanji', 'kanji', 'kanji', 'kanji'];
   const now = new Date();
   for (let i = 0; i < 12; i++) {
     const stage = Math.floor(Math.random() * 4);
@@ -593,11 +574,9 @@ function render(data, isDemo) {
         <div class="bar-meta" style="font-style:italic;color:var(--muted)">in progress</div>
       </div>`;
 
-  // Next level prediction
-  if (data.assignments && data.assignments.length > 0) {
-    const nextLevel = computeNextLevel(data.assignments);
-    renderNextLevel(nextLevel);
-  }
+  // Next level prediction — always show
+  const nextLevel = computeNextLevel(data.assignments || []);
+  renderNextLevel(nextLevel);
 
   // Speedup analysis
   if (data.reviewStats && data.reviewStats.length > 0) {
