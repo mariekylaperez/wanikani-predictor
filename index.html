@@ -16,7 +16,6 @@
     <p>Forecast your kanji mastery date</p>
   </header>
 
-  <!-- Input card -->
   <div class="card" id="input-card">
     <div class="eyebrow">WaniKani v2 API Key</div>
     <div class="input-row">
@@ -36,20 +35,16 @@
     </p>
   </div>
 
-  <!-- Loading -->
   <div id="loading">
     <div class="spinner"></div>
     <p id="loading-msg" style="font-size:12px;color:var(--muted);letter-spacing:0.1em">Fetching your journey...</p>
   </div>
 
-  <!-- Results -->
   <div id="results">
     <button class="btn ghost" id="reset-btn" onclick="reset()">← Start over</button>
 
-    <!-- Stats -->
     <div class="stats-grid" id="stats-grid"></div>
 
-    <!-- Big prediction -->
     <div class="big-pred" id="big-pred">
       <div class="eyebrow">Estimated Level 60 Date</div>
       <div class="pred-date" id="pred-date"></div>
@@ -61,7 +56,6 @@
       <div class="scenarios" id="scenarios"></div>
     </div>
 
-    <!-- Level chart -->
     <div class="chart-wrap">
       <div class="eyebrow" id="chart-label"></div>
       <div id="chart"></div>
@@ -75,36 +69,21 @@
       Predictions extrapolate your selected pace across all remaining levels.
     </p>
 
-    <!-- How to speed up -->
-    <div class="speedup-section" id="speedup-section" style="display:none">
+    <!-- Next level prediction -->
+    <div class="next-level-section" id="next-level-section" style="display:none">
       <div class="speedup-header">
-        <div class="eyebrow" style="color:var(--gold);margin-bottom:4px">Potential time savings</div>
-        <h2 class="speedup-title">How to reach Level 60 faster</h2>
-        <p class="speedup-sub">Based on your actual review history</p>
+        <div class="eyebrow" style="color:var(--red);margin-bottom:4px">Coming up</div>
+        <h2 class="speedup-title">Next level prediction</h2>
+        <p class="speedup-sub">Based on your current assignments at 9am & 6pm windows</p>
       </div>
-
-      <div class="insight-grid" id="insight-grid"></div>
-
-      <div class="insight-detail card gold" id="insight-windows" style="margin-bottom:20px">
-        <div class="eyebrow">Review windows</div>
-        <div id="windows-content"></div>
-      </div>
-
-      <div class="insight-detail card gold" id="insight-mistakes" style="margin-bottom:20px">
-        <div class="eyebrow">Accuracy impact</div>
-        <div id="mistakes-content"></div>
-      </div>
-
-      <p class="footnote">
-        * Minimum level time assumes hitting every SRS review window on the dot with 100% accuracy:
-        4h → 8h → 23h → 47h for radicals, plus a second pass for kanji. Theoretical minimum is ~3d 10h per level.
-        Your actual savings will vary based on sleep schedule and review load.
-      </p>
+      <div class="card" style="margin-bottom:20px" id="next-level-content"></div>
     </div>
+
+    <!-- How to speed up -->
+    <div class="speedup-section" id="speedup-section" style="display:none"></div>
   </div>
 
 </div>
-
 <script src="app.js"></script>
 </body>
 </html>
