@@ -698,3 +698,18 @@ header p {
   color: var(--muted);
   margin-top: 2px;
 }
+
+.next-level-imminent {
+  padding: 8px 0;
+}
+.imminent-badge {
+  display: inline-block;
+  background: rgba(74,124,89,0.1);
+  border: 1px solid rgba(74,124,89,0.3);
+  color: #4a7c59;
+  border-radius: 2px;
+  padding: 5px 12px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
