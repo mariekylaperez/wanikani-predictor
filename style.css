@@ -647,3 +647,54 @@ header p {
   line-height: 1.6;
   margin-bottom: 12px;
 }
+/* ── next level section ── */
+.next-level-section {
+  margin-top: 32px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+
+.next-level-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 560px) { .next-level-grid { grid-template-columns: 1fr; } }
+
+.next-date-big {
+  font-family: 'Shippori Mincho', serif;
+  font-size: clamp(16px, 3vw, 22px);
+  font-weight: 800;
+  color: var(--red);
+  line-height: 1.2;
+  margin: 6px 0 4px;
+}
+
+.stage-pips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.stage-pip {
+  background: var(--paper);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 4px 8px;
+  text-align: center;
+  min-width: 44px;
+}
+.stage-pip-count {
+  font-family: 'Shippori Mincho', serif;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--red);
+  line-height: 1;
+}
+.stage-pip-label {
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 2px;
+}
