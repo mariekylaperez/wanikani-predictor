@@ -33,7 +33,7 @@ You get:
 
 ### 2. Open the predictor
 
-Visit your hosted URL (e.g. `https://yourusername.github.io/wanikani-predictor`) or open `index.html` locally in a browser.
+Visit your hosted URL (e.g. `https://mariekylaperez.github.io/wanikani-predictor`) or open `index.html` locally in a browser.
 
 ### 3. Enter your token and predict
 
@@ -50,7 +50,6 @@ wanikani-predictor/
 ├── index.html    # Page structure and markup
 ├── style.css     # All styles and layout
 ├── app.js        # API fetching, stats computation, rendering
-└── README.md     # This file
 ```
 
 ---
@@ -63,6 +62,8 @@ wanikani-predictor/
 4. Your remaining levels (`60 - current_level`) are multiplied by the selected pace to produce a target date
 
 The **Recent** pace uses your last 5 completed levels, which often gives the most relevant prediction if your study habits have changed over time.
+
+If you have ever **reset your account**, the tool automatically detects this and only uses data from your most recent run. Pre-reset levels are ignored so they do not skew your prediction.
 
 Bar colors in the chart:
 - 🟢 **Green** — within normal range (under 1.5× your median)
