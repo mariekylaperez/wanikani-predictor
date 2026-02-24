@@ -17,8 +17,24 @@ function relDays(d) {
 }
 
 // ── stats computation ──────────────────────────────────────────────────────
+
+// If the user has ever reset, there will be duplicate level numbers in their
+// progressions (e.g. two level 1s, two level 2s, etc.). We keep only the most
+// recently started progression for each level so we analyse the current run only.
+function getLatestRun(progressions) {
+  const byLevel = {};
+  for (const p of progressions) {
+    const lvl = p.data.level;
+    if (!byLevel[lvl] || new Date(p.data.started_at) > new Date(byLevel[lvl].data.started_at)) {
+      byLevel[lvl] = p;
+    }
+  }
+  return Object.values(byLevel).sort((a, b) => a.data.level - b.data.level);
+}
+
 function computeStats(progressions, currentLevel) {
-  const done = progressions.filter(p =>
+  const latest = getLatestRun(progressions);
+  const done = latest.filter(p =>
     p.data.passed_at && !p.data.abandoned_at && p.data.level < currentLevel
   );
   if (done.length < 2) return null;
@@ -125,7 +141,7 @@ function render(data, isDemo) {
   const maxD = Math.max(...stats.durs);
 
   document.getElementById('chart-label').textContent =
-    `Days per level — last ${shown.length} levels`;
+    `Days per level — last ${shown.length} levels (current run)`;
 
   document.getElementById('chart').innerHTML =
     shown.map(p => {
