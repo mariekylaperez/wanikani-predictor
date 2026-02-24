@@ -16,43 +16,41 @@ function relDays(d) {
   return `~${(diff / 365).toFixed(1)}yr from now`;
 }
 
-// ── stats computation ──────────────────────────────────────────────────────
+function fmtDays(d) {
+  if (d < 1) return `${Math.round(d * 24)}h`;
+  if (d < 2) return `${d.toFixed(1)}d`;
+  return `${Math.round(d)}d`;
+}
 
-// Finds the start date of the most recent continuous run.
-// A reset is detected when a progression's started_at is LATER than a
-// higher-numbered level's started_at — meaning the level order restarted.
-// We find the most recent such restart and discard everything before it.
+// ── SRS constants ──────────────────────────────────────────────────────────
+const MINIMUM_DAYS_PER_LEVEL = 3.42;
+const AVG_EXTRA_HOURS_PER_MISTAKE = 20.5;
+
+// ── stats computation ──────────────────────────────────────────────────────
 function getCurrentRunStart(progressions) {
   if (!progressions.length) return null;
-
   const sorted = [...progressions].sort(
     (a, b) => new Date(a.data.started_at) - new Date(b.data.started_at)
   );
-
   let runStartDate = new Date(sorted[0].data.started_at);
   let prevLevel = 0;
-
   for (const p of sorted) {
     if (p.data.level <= prevLevel && p.data.level <= 5) {
       runStartDate = new Date(p.data.started_at);
     }
     prevLevel = p.data.level;
   }
-
   return runStartDate;
 }
 
 function computeStats(progressions, currentLevel) {
   const runStart = getCurrentRunStart(progressions);
-
   const currentRun = progressions.filter(p =>
     new Date(p.data.started_at) >= runStart
   );
-
   const done = currentRun.filter(p =>
     p.data.passed_at && !p.data.abandoned_at && p.data.level < currentLevel
   );
-
   if (done.length < 2) return null;
 
   done.sort((a, b) => a.data.level - b.data.level);
@@ -71,6 +69,171 @@ function computeStats(progressions, currentLevel) {
   return { avg, median, fast, slow, recent, durs, sorted, done };
 }
 
+// ── speedup analysis ───────────────────────────────────────────────────────
+function computeSpeedup(reviewStats, stats) {
+  const median = stats.median;
+  const left   = 60 - _currentLevel;
+
+  const windowLostPerLevel = Math.max(0, median - MINIMUM_DAYS_PER_LEVEL);
+  const windowSavingTotal  = windowLostPerLevel * left;
+
+  let totalMeaningIncorrect = 0;
+  let totalReadingIncorrect = 0;
+  let totalMeaningCorrect   = 0;
+  let totalReadingCorrect   = 0;
+  let totalExtraHours       = 0;
+  let leechCount            = 0;
+
+  for (const rs of reviewStats) {
+    const d = rs.data;
+    totalMeaningIncorrect += d.meaning_incorrect;
+    totalReadingIncorrect += d.reading_incorrect;
+    totalMeaningCorrect   += d.meaning_correct;
+    totalReadingCorrect   += d.reading_correct;
+    const totalWrong = d.meaning_incorrect + d.reading_incorrect;
+    totalExtraHours += totalWrong * AVG_EXTRA_HOURS_PER_MISTAKE;
+    if (totalWrong >= 4) leechCount++;
+  }
+
+  const totalAnswers  = totalMeaningCorrect + totalReadingCorrect +
+                        totalMeaningIncorrect + totalReadingIncorrect;
+  const totalWrong    = totalMeaningIncorrect + totalReadingIncorrect;
+  const overallAcc    = totalAnswers > 0
+    ? ((totalAnswers - totalWrong) / totalAnswers * 100)
+    : 100;
+
+  const mistakeDaysLost         = totalExtraHours / 24;
+  const mistakeDaysLostPerLevel = stats.done.length > 0
+    ? mistakeDaysLost / stats.done.length
+    : 0;
+  const mistakeSavingTotal      = mistakeDaysLostPerLevel * left;
+  const combinedSaving = Math.max(windowSavingTotal, mistakeSavingTotal) +
+                         Math.min(windowSavingTotal, mistakeSavingTotal) * 0.4;
+
+  return {
+    windowLostPerLevel, windowSavingTotal,
+    mistakeDaysLostPerLevel, mistakeSavingTotal,
+    combinedSaving, overallAcc, totalWrong, totalAnswers, leechCount
+  };
+}
+
+// ── render speedup ─────────────────────────────────────────────────────────
+function renderSpeedup(speedup) {
+  const left = 60 - _currentLevel;
+
+  document.getElementById('insight-grid').innerHTML = `
+    <div class="insight-box">
+      <div class="insight-saving">${fmtDays(speedup.windowLostPerLevel)}</div>
+      <div class="insight-saving-label">lost per level</div>
+      <div class="insight-desc">to missed review windows vs hitting every session on time</div>
+    </div>
+    <div class="insight-box">
+      <div class="insight-saving">${fmtDays(speedup.mistakeDaysLostPerLevel)}</div>
+      <div class="insight-saving-label">lost per level</div>
+      <div class="insight-desc">to incorrect answers pushing items back in the SRS queue</div>
+    </div>
+    <div class="insight-box">
+      <div class="insight-saving">${fmtDays(speedup.combinedSaving)}</div>
+      <div class="insight-saving-label">total potential saving</div>
+      <div class="insight-desc">across your remaining ${left} levels if you optimise both</div>
+    </div>
+  `;
+
+  const idealDate  = addDays(new Date(), left * MINIMUM_DAYS_PER_LEVEL);
+  const actualDate = addDays(new Date(), left * _stats.median);
+
+  document.getElementById('windows-content').innerHTML = `
+    <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.6">
+      WaniKani's SRS has fixed intervals. Every time you miss a review window, that item
+      sits idle until the next time you log in — adding hours or days to its progression.
+      Your actual median is <strong style="color:var(--ink)">${fmtDays(_stats.median)}/level</strong>.
+      The theoretical minimum with perfect timing is <strong style="color:#4a7c59">${fmtDays(MINIMUM_DAYS_PER_LEVEL)}/level</strong>.
+    </p>
+    <div class="eyebrow" style="margin-bottom:8px">SRS ladder (radical / kanji path to Guru)</div>
+    <div class="srs-ladder">
+      <div class="srs-step"><div class="srs-step-stage">Lesson</div><div class="srs-step-time">0h</div></div>
+      <div class="srs-arrow">→</div>
+      <div class="srs-step"><div class="srs-step-stage">App 1</div><div class="srs-step-time">+4h</div></div>
+      <div class="srs-arrow">→</div>
+      <div class="srs-step"><div class="srs-step-stage">App 2</div><div class="srs-step-time">+8h</div></div>
+      <div class="srs-arrow">→</div>
+      <div class="srs-step"><div class="srs-step-stage">App 3</div><div class="srs-step-time">+23h</div></div>
+      <div class="srs-arrow">→</div>
+      <div class="srs-step"><div class="srs-step-stage">App 4</div><div class="srs-step-time">+47h</div></div>
+      <div class="srs-arrow">→</div>
+      <div class="srs-step" style="border-color:var(--gold)"><div class="srs-step-stage">Guru ✓</div><div class="srs-step-time" style="color:var(--gold)">82h</div></div>
+    </div>
+    <p style="font-size:11px;color:var(--muted);margin-bottom:16px;line-height:1.6">
+      Missing the 4h window by just 4 hours costs you a full day. Missing the 8h window costs another.
+      A consistent review routine — especially catching the short early windows — has the biggest impact.
+    </p>
+    <div class="ideal-vs-actual">
+      <div class="ideal-box actual">
+        <div class="ideal-box-label">Your actual median</div>
+        <div class="ideal-box-val">${fmtDays(_stats.median)}</div>
+        <div class="ideal-box-sub">per level</div>
+      </div>
+      <div class="ideal-box perfect">
+        <div class="ideal-box-label">Perfect timing</div>
+        <div class="ideal-box-val">${fmtDays(MINIMUM_DAYS_PER_LEVEL)}</div>
+        <div class="ideal-box-sub">per level (theoretical)</div>
+      </div>
+    </div>
+    <div class="insight-row">
+      <span class="insight-row-label">Time lost per level to missed windows</span>
+      <span class="insight-row-val ${speedup.windowLostPerLevel > 7 ? 'bad' : speedup.windowLostPerLevel > 3 ? 'warn' : 'good'}">${fmtDays(speedup.windowLostPerLevel)}</span>
+    </div>
+    <div class="insight-row">
+      <span class="insight-row-label">Total days saved across ${left} remaining levels</span>
+      <span class="insight-row-val good">${fmtDays(speedup.windowSavingTotal)}</span>
+    </div>
+    <div class="insight-row">
+      <span class="insight-row-label">Level 60 with perfect windows</span>
+      <span class="insight-row-val good">${fmtDate(idealDate)}</span>
+    </div>
+    <div class="insight-row">
+      <span class="insight-row-label">Level 60 at current pace</span>
+      <span class="insight-row-val bad">${fmtDate(actualDate)}</span>
+    </div>
+  `;
+
+  const accClass = speedup.overallAcc >= 90 ? 'good' : speedup.overallAcc >= 75 ? 'warn' : 'bad';
+
+  document.getElementById('mistakes-content').innerHTML = `
+    <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.6">
+      Every incorrect answer bumps an item back one SRS stage, adding an average of
+      <strong style="color:var(--ink)">~${AVG_EXTRA_HOURS_PER_MISTAKE}h</strong> to that item's journey to Guru.
+      For radicals and kanji — which gate your level-up — this directly delays progression.
+    </p>
+    <div class="insight-row">
+      <span class="insight-row-label">Overall accuracy (all time)</span>
+      <span class="insight-row-val ${accClass}">${speedup.overallAcc.toFixed(1)}%</span>
+    </div>
+    <div class="insight-row">
+      <span class="insight-row-label">Total incorrect answers</span>
+      <span class="insight-row-val ${speedup.totalWrong > 500 ? 'bad' : speedup.totalWrong > 200 ? 'warn' : 'good'}">${speedup.totalWrong.toLocaleString()}</span>
+    </div>
+    <div class="insight-row">
+      <span class="insight-row-label">Extra days added by mistakes (all levels)</span>
+      <span class="insight-row-val warn">${fmtDays(speedup.mistakeDaysLostPerLevel * _stats.done.length)}</span>
+    </div>
+    <div class="insight-row">
+      <span class="insight-row-label">Extra delay per level from mistakes</span>
+      <span class="insight-row-val ${speedup.mistakeDaysLostPerLevel > 3 ? 'bad' : speedup.mistakeDaysLostPerLevel > 1 ? 'warn' : 'good'}">${fmtDays(speedup.mistakeDaysLostPerLevel)}</span>
+    </div>
+    <div class="insight-row">
+      <span class="insight-row-label">Items answered wrong 4+ times (leeches)</span>
+      <span class="insight-row-val ${speedup.leechCount > 50 ? 'bad' : speedup.leechCount > 20 ? 'warn' : 'good'}">${speedup.leechCount}</span>
+    </div>
+    <div class="insight-row">
+      <span class="insight-row-label">Days saved across ${left} levels with 100% accuracy</span>
+      <span class="insight-row-val good">${fmtDays(speedup.mistakeSavingTotal)}</span>
+    </div>
+  `;
+
+  document.getElementById('speedup-section').style.display = 'block';
+}
+
 // ── WaniKani API fetch ─────────────────────────────────────────────────────
 async function fetchWK(token) {
   const headers = {
@@ -78,11 +241,13 @@ async function fetchWK(token) {
     'Wanikani-Revision': '20170710'
   };
 
+  setLoadingMsg('Fetching user data...');
   const uRes = await fetch('https://api.wanikani.com/v2/user', { headers });
   if (uRes.status === 401) throw new Error('Invalid API key — check wanikani.com/settings/personal_access_tokens');
   if (!uRes.ok) throw new Error(`API error ${uRes.status}`);
   const user = await uRes.json();
 
+  setLoadingMsg('Fetching level progressions...');
   let url = 'https://api.wanikani.com/v2/level_progressions';
   let progressions = [];
   while (url) {
@@ -93,7 +258,18 @@ async function fetchWK(token) {
     url = j.pages?.next_url || null;
   }
 
-  return { user, progressions };
+  setLoadingMsg('Fetching review statistics...');
+  url = 'https://api.wanikani.com/v2/review_statistics';
+  let reviewStats = [];
+  while (url) {
+    const r = await fetch(url, { headers });
+    if (!r.ok) throw new Error(`API error ${r.status}`);
+    const j = await r.json();
+    reviewStats = reviewStats.concat(j.data);
+    url = j.pages?.next_url || null;
+  }
+
+  return { user, progressions, reviewStats };
 }
 
 // ── demo data ──────────────────────────────────────────────────────────────
@@ -117,9 +293,22 @@ function getDemoData() {
       }
     });
   }
+  const reviewStats = [];
+  for (let i = 0; i < 400; i++) {
+    const wrong = Math.floor(Math.random() * 8);
+    reviewStats.push({
+      data: {
+        meaning_correct: 5 + Math.floor(Math.random() * 20),
+        meaning_incorrect: Math.floor(wrong / 2),
+        reading_correct: 5 + Math.floor(Math.random() * 20),
+        reading_incorrect: wrong - Math.floor(wrong / 2),
+      }
+    });
+  }
   return {
     user: { data: { current_level: 32, username: 'demo_user' } },
-    progressions: p
+    progressions: p,
+    reviewStats
   };
 }
 
@@ -151,7 +340,7 @@ function render(data, isDemo) {
   updatePrediction();
 
   const shown = stats.done.slice(-30);
-  const maxD = Math.max(...stats.durs);
+  const maxD  = Math.max(...stats.durs);
 
   document.getElementById('chart-label').textContent =
     `Days per level — last ${shown.length} levels (current run)`;
@@ -175,6 +364,11 @@ function render(data, isDemo) {
         <div class="bar-bg"><div class="bar-fill" style="width:35%;background:repeating-linear-gradient(45deg,var(--border),var(--border) 2px,transparent 2px,transparent 6px)"></div></div>
         <div class="bar-meta" style="font-style:italic;color:var(--muted)">in progress</div>
       </div>`;
+
+  if (data.reviewStats && data.reviewStats.length > 0) {
+    const speedup = computeSpeedup(data.reviewStats, stats);
+    renderSpeedup(speedup);
+  }
 
   document.getElementById('input-card').style.display = 'none';
   document.getElementById('loading').style.display = 'none';
@@ -267,6 +461,7 @@ function reset() {
   document.getElementById('input-card').style.display = 'block';
   document.getElementById('results').style.display = 'none';
   document.getElementById('reset-btn').style.display = 'none';
+  document.getElementById('speedup-section').style.display = 'none';
   const note = document.querySelector('#results .demo-note');
   if (note) note.remove();
   _stats = null;
@@ -278,6 +473,11 @@ function setLoading(on) {
   document.getElementById('loading').style.display = on ? 'block' : 'none';
   document.getElementById('input-card').style.display = on ? 'none' : 'block';
   document.getElementById('fetch-btn').disabled = on;
+}
+
+function setLoadingMsg(msg) {
+  const el = document.getElementById('loading-msg');
+  if (el) el.textContent = msg;
 }
 
 function showError(msg) {
