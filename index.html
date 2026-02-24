@@ -39,7 +39,7 @@
   <!-- Loading -->
   <div id="loading">
     <div class="spinner"></div>
-    <p style="font-size:12px;color:var(--muted);letter-spacing:0.1em">Fetching your journey...</p>
+    <p id="loading-msg" style="font-size:12px;color:var(--muted);letter-spacing:0.1em">Fetching your journey...</p>
   </div>
 
   <!-- Results -->
@@ -74,6 +74,33 @@
       Time per level calculated from <em>started_at</em> → <em>passed_at</em>.
       Predictions extrapolate your selected pace across all remaining levels.
     </p>
+
+    <!-- How to speed up -->
+    <div class="speedup-section" id="speedup-section" style="display:none">
+      <div class="speedup-header">
+        <div class="eyebrow" style="color:var(--gold);margin-bottom:4px">Potential time savings</div>
+        <h2 class="speedup-title">How to reach Level 60 faster</h2>
+        <p class="speedup-sub">Based on your actual review history</p>
+      </div>
+
+      <div class="insight-grid" id="insight-grid"></div>
+
+      <div class="insight-detail card gold" id="insight-windows" style="margin-bottom:20px">
+        <div class="eyebrow">Review windows</div>
+        <div id="windows-content"></div>
+      </div>
+
+      <div class="insight-detail card gold" id="insight-mistakes" style="margin-bottom:20px">
+        <div class="eyebrow">Accuracy impact</div>
+        <div id="mistakes-content"></div>
+      </div>
+
+      <p class="footnote">
+        * Minimum level time assumes hitting every SRS review window on the dot with 100% accuracy:
+        4h → 8h → 23h → 47h for radicals, plus a second pass for kanji. Theoretical minimum is ~3d 10h per level.
+        Your actual savings will vary based on sleep schedule and review load.
+      </p>
+    </div>
   </div>
 
 </div>
