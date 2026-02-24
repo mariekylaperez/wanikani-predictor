@@ -23,8 +23,15 @@ function fmtDays(d) {
 }
 
 // ── SRS constants ──────────────────────────────────────────────────────────
+// Minimum time per level assuming perfect windows + 0 mistakes
+// Radicals: 4h+8h+23h+47h = 82h to Guru
+// Kanji unlocked after radicals Guru, same ladder = 82h more
+// But ~50% of kanji are available from lesson start, so kanji ladder
+// runs in parallel. WK's stated minimum for fast levels = ~3d 10h
 const MINIMUM_DAYS_PER_LEVEL = 3.42;
-const AVG_EXTRA_HOURS_PER_MISTAKE = 20.5;
+
+// SRS intervals in hours per stage
+const SRS_INTERVALS = [4, 8, 23, 47]; // App1→2, App2→3, App3→4, App4→Guru
 
 // ── stats computation ──────────────────────────────────────────────────────
 function getCurrentRunStart(progressions) {
@@ -70,164 +77,167 @@ function computeStats(progressions, currentLevel) {
 }
 
 // ── speedup analysis ───────────────────────────────────────────────────────
-function computeSpeedup(reviewStats, stats) {
-  const median = stats.median;
-  const left   = 60 - _currentLevel;
-
-  const windowLostPerLevel = Math.max(0, median - MINIMUM_DAYS_PER_LEVEL);
-  const windowSavingTotal  = windowLostPerLevel * left;
-
-  let totalMeaningIncorrect = 0;
-  let totalReadingIncorrect = 0;
-  let totalMeaningCorrect   = 0;
-  let totalReadingCorrect   = 0;
-  let totalExtraHours       = 0;
-  let leechCount            = 0;
-
+function computeSpeedup(reviewStats) {
+  let correct = 0, incorrect = 0;
   for (const rs of reviewStats) {
-    const d = rs.data;
-    totalMeaningIncorrect += d.meaning_incorrect;
-    totalReadingIncorrect += d.reading_incorrect;
-    totalMeaningCorrect   += d.meaning_correct;
-    totalReadingCorrect   += d.reading_correct;
-    const totalWrong = d.meaning_incorrect + d.reading_incorrect;
-    totalExtraHours += totalWrong * AVG_EXTRA_HOURS_PER_MISTAKE;
-    if (totalWrong >= 4) leechCount++;
+    correct   += rs.data.meaning_correct + rs.data.reading_correct;
+    incorrect += rs.data.meaning_incorrect + rs.data.reading_incorrect;
   }
+  const total    = correct + incorrect;
+  const accuracy = total > 0 ? (correct / total) * 100 : 100;
 
-  const totalAnswers  = totalMeaningCorrect + totalReadingCorrect +
-                        totalMeaningIncorrect + totalReadingIncorrect;
-  const totalWrong    = totalMeaningIncorrect + totalReadingIncorrect;
-  const overallAcc    = totalAnswers > 0
-    ? ((totalAnswers - totalWrong) / totalAnswers * 100)
-    : 100;
+  // Each wrong answer costs one extra SRS interval on average
+  // Average interval across all 4 stages = (4+8+23+47)/4 = 20.5h
+  const avgIntervalHours = 20.5;
 
-  const mistakeDaysLost         = totalExtraHours / 24;
-  const mistakeDaysLostPerLevel = stats.done.length > 0
-    ? mistakeDaysLost / stats.done.length
-    : 0;
-  const mistakeSavingTotal      = mistakeDaysLostPerLevel * left;
-  const combinedSaving = Math.max(windowSavingTotal, mistakeSavingTotal) +
-                         Math.min(windowSavingTotal, mistakeSavingTotal) * 0.4;
+  // Extra hours per level due to mistakes:
+  // incorrectRate * totalReviewsPerLevel * avgIntervalHours
+  // A typical level has ~100 reviews (radicals + kanji + vocab)
+  const estReviewsPerLevel  = 100;
+  const incorrectRate       = total > 0 ? incorrect / total : 0;
+  const extraHoursPerLevel  = incorrectRate * estReviewsPerLevel * avgIntervalHours;
+  const extraDaysPerLevel   = extraHoursPerLevel / 24;
+
+  // Window loss = actual median minus theoretical minimum
+  const windowLostPerLevel  = Math.max(0, _stats.median - MINIMUM_DAYS_PER_LEVEL);
+
+  // Perfect scenario = minimum days (window perfect + no mistakes)
+  // Realistic best = minimum + small buffer for sleep (can't always hit 4h window)
+  const sleepBufferDays     = 0.5; // ~12h buffer for sleep schedule
+  const realisticBestDays   = MINIMUM_DAYS_PER_LEVEL + sleepBufferDays;
 
   return {
-    windowLostPerLevel, windowSavingTotal,
-    mistakeDaysLostPerLevel, mistakeSavingTotal,
-    combinedSaving, overallAcc, totalWrong, totalAnswers, leechCount
+    accuracy,
+    total,
+    incorrect,
+    extraDaysPerLevel,
+    windowLostPerLevel,
+    realisticBestDays,
   };
 }
 
 // ── render speedup ─────────────────────────────────────────────────────────
 function renderSpeedup(speedup) {
-  const left = 60 - _currentLevel;
+  const left         = 60 - _currentLevel;
+  const currentDate  = addDays(new Date(), left * _stats.median);
+  const perfectDate  = addDays(new Date(), left * MINIMUM_DAYS_PER_LEVEL);
+  const realistDate  = addDays(new Date(), left * speedup.realisticBestDays);
+  const noMistakeDate = addDays(new Date(), left * Math.max(MINIMUM_DAYS_PER_LEVEL, _stats.median - speedup.extraDaysPerLevel));
 
-  document.getElementById('insight-grid').innerHTML = `
-    <div class="insight-box">
-      <div class="insight-saving">${fmtDays(speedup.windowLostPerLevel)}</div>
-      <div class="insight-saving-label">lost per level</div>
-      <div class="insight-desc">to missed review windows vs hitting every session on time</div>
-    </div>
-    <div class="insight-box">
-      <div class="insight-saving">${fmtDays(speedup.mistakeDaysLostPerLevel)}</div>
-      <div class="insight-saving-label">lost per level</div>
-      <div class="insight-desc">to incorrect answers pushing items back in the SRS queue</div>
-    </div>
-    <div class="insight-box">
-      <div class="insight-saving">${fmtDays(speedup.combinedSaving)}</div>
-      <div class="insight-saving-label">total potential saving</div>
-      <div class="insight-desc">across your remaining ${left} levels if you optimise both</div>
-    </div>
-  `;
+  const accColor = speedup.accuracy >= 90 ? '#4a7c59' : speedup.accuracy >= 75 ? 'var(--gold)' : 'var(--red)';
+  const accTip   = speedup.accuracy >= 90
+    ? 'Great accuracy — review windows are your main lever.'
+    : speedup.accuracy >= 75
+    ? 'Improving accuracy will meaningfully speed up your levels.'
+    : 'Accuracy is your biggest bottleneck — each wrong answer adds ~20h per item.';
 
-  const idealDate  = addDays(new Date(), left * MINIMUM_DAYS_PER_LEVEL);
-  const actualDate = addDays(new Date(), left * _stats.median);
-
-  document.getElementById('windows-content').innerHTML = `
-    <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.6">
-      WaniKani's SRS has fixed intervals. Every time you miss a review window, that item
-      sits idle until the next time you log in — adding hours or days to its progression.
-      Your actual median is <strong style="color:var(--ink)">${fmtDays(_stats.median)}/level</strong>.
-      The theoretical minimum with perfect timing is <strong style="color:#4a7c59">${fmtDays(MINIMUM_DAYS_PER_LEVEL)}/level</strong>.
-    </p>
-    <div class="eyebrow" style="margin-bottom:8px">SRS ladder (radical / kanji path to Guru)</div>
-    <div class="srs-ladder">
-      <div class="srs-step"><div class="srs-step-stage">Lesson</div><div class="srs-step-time">0h</div></div>
-      <div class="srs-arrow">→</div>
-      <div class="srs-step"><div class="srs-step-stage">App 1</div><div class="srs-step-time">+4h</div></div>
-      <div class="srs-arrow">→</div>
-      <div class="srs-step"><div class="srs-step-stage">App 2</div><div class="srs-step-time">+8h</div></div>
-      <div class="srs-arrow">→</div>
-      <div class="srs-step"><div class="srs-step-stage">App 3</div><div class="srs-step-time">+23h</div></div>
-      <div class="srs-arrow">→</div>
-      <div class="srs-step"><div class="srs-step-stage">App 4</div><div class="srs-step-time">+47h</div></div>
-      <div class="srs-arrow">→</div>
-      <div class="srs-step" style="border-color:var(--gold)"><div class="srs-step-stage">Guru ✓</div><div class="srs-step-time" style="color:var(--gold)">82h</div></div>
+  document.getElementById('speedup-section').innerHTML = `
+    <div class="speedup-header">
+      <div class="eyebrow" style="color:var(--gold);margin-bottom:4px">How to go faster</div>
+      <h2 class="speedup-title">Your road to Level 60</h2>
+      <p class="speedup-sub">Two levers: review timing and accuracy</p>
     </div>
-    <p style="font-size:11px;color:var(--muted);margin-bottom:16px;line-height:1.6">
-      Missing the 4h window by just 4 hours costs you a full day. Missing the 8h window costs another.
-      A consistent review routine — especially catching the short early windows — has the biggest impact.
-    </p>
-    <div class="ideal-vs-actual">
-      <div class="ideal-box actual">
-        <div class="ideal-box-label">Your actual median</div>
-        <div class="ideal-box-val">${fmtDays(_stats.median)}</div>
-        <div class="ideal-box-sub">per level</div>
+
+    <!-- Current vs best projections -->
+    <div class="proj-grid">
+      <div class="proj-box current">
+        <div class="proj-label">At your current pace</div>
+        <div class="proj-date">${fmtDate(currentDate)}</div>
+        <div class="proj-rel">${relDays(currentDate)}</div>
+        <div class="proj-detail">${fmtDays(_stats.median)} / level</div>
       </div>
-      <div class="ideal-box perfect">
-        <div class="ideal-box-label">Perfect timing</div>
-        <div class="ideal-box-val">${fmtDays(MINIMUM_DAYS_PER_LEVEL)}</div>
-        <div class="ideal-box-sub">per level (theoretical)</div>
+      <div class="proj-box best">
+        <div class="proj-label">Perfect windows + accuracy</div>
+        <div class="proj-date">${fmtDate(perfectDate)}</div>
+        <div class="proj-rel">${relDays(perfectDate)}</div>
+        <div class="proj-detail">${fmtDays(MINIMUM_DAYS_PER_LEVEL)} / level (theoretical min)</div>
+      </div>
+      <div class="proj-box realistic">
+        <div class="proj-label">Realistic best case</div>
+        <div class="proj-date">${fmtDate(realistDate)}</div>
+        <div class="proj-rel">${relDays(realistDate)}</div>
+        <div class="proj-detail">${fmtDays(speedup.realisticBestDays)} / level (min + sleep buffer)</div>
       </div>
     </div>
-    <div class="insight-row">
-      <span class="insight-row-label">Time lost per level to missed windows</span>
-      <span class="insight-row-val ${speedup.windowLostPerLevel > 7 ? 'bad' : speedup.windowLostPerLevel > 3 ? 'warn' : 'good'}">${fmtDays(speedup.windowLostPerLevel)}</span>
-    </div>
-    <div class="insight-row">
-      <span class="insight-row-label">Total days saved across ${left} remaining levels</span>
-      <span class="insight-row-val good">${fmtDays(speedup.windowSavingTotal)}</span>
-    </div>
-    <div class="insight-row">
-      <span class="insight-row-label">Level 60 with perfect windows</span>
-      <span class="insight-row-val good">${fmtDate(idealDate)}</span>
-    </div>
-    <div class="insight-row">
-      <span class="insight-row-label">Level 60 at current pace</span>
-      <span class="insight-row-val bad">${fmtDate(actualDate)}</span>
-    </div>
-  `;
 
-  const accClass = speedup.overallAcc >= 90 ? 'good' : speedup.overallAcc >= 75 ? 'warn' : 'bad';
+    <!-- Lever 1: Windows -->
+    <div class="card gold">
+      <div class="eyebrow">Lever 1 — Hit every review window</div>
+      <p class="lever-intro">
+        WaniKani unlocks reviews at fixed intervals. The moment a window opens,
+        the clock stops — but if you miss it, your item just waits until next time you log in.
+        The early windows matter most.
+      </p>
+      <div class="srs-ladder">
+        ${SRS_INTERVALS.map((h, i) => `
+          <div class="srs-step${i === 0 ? ' highlight' : ''}">
+            <div class="srs-step-stage">App ${i + 1}→${i + 2 <= 4 ? i + 2 : 'Guru'}</div>
+            <div class="srs-step-time">${h}h</div>
+            ${i === 0 ? '<div class="srs-step-note">most critical</div>' : ''}
+          </div>
+          ${i < SRS_INTERVALS.length - 1 ? '<div class="srs-arrow">→</div>' : ''}
+        `).join('')}
+        <div class="srs-arrow">→</div>
+        <div class="srs-step" style="border-color:var(--gold)">
+          <div class="srs-step-stage">Guru ✓</div>
+          <div class="srs-step-time" style="color:var(--gold)">82h</div>
+        </div>
+      </div>
+      <div class="insight-row">
+        <span class="insight-row-label">Your median vs theoretical minimum</span>
+        <span class="insight-row-val">${fmtDays(_stats.median)} vs ${fmtDays(MINIMUM_DAYS_PER_LEVEL)}</span>
+      </div>
+      <div class="insight-row">
+        <span class="insight-row-label">Days lost per level to missed windows</span>
+        <span class="insight-row-val ${speedup.windowLostPerLevel > 7 ? 'bad' : speedup.windowLostPerLevel > 3 ? 'warn' : 'good'}">${fmtDays(speedup.windowLostPerLevel)}</span>
+      </div>
+      <div class="insight-row">
+        <span class="insight-row-label">Time saved across ${left} remaining levels</span>
+        <span class="insight-row-val good">${fmtDays(speedup.windowLostPerLevel * left)}</span>
+      </div>
+      <div class="lever-tip">
+        💡 Set a reminder for ~4 hours after your daily lessons to catch that first Apprentice window.
+        Missing it by even a few hours cascades into losing a full day.
+      </div>
+    </div>
 
-  document.getElementById('mistakes-content').innerHTML = `
-    <p style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.6">
-      Every incorrect answer bumps an item back one SRS stage, adding an average of
-      <strong style="color:var(--ink)">~${AVG_EXTRA_HOURS_PER_MISTAKE}h</strong> to that item's journey to Guru.
-      For radicals and kanji — which gate your level-up — this directly delays progression.
-    </p>
-    <div class="insight-row">
-      <span class="insight-row-label">Overall accuracy (all time)</span>
-      <span class="insight-row-val ${accClass}">${speedup.overallAcc.toFixed(1)}%</span>
-    </div>
-    <div class="insight-row">
-      <span class="insight-row-label">Total incorrect answers</span>
-      <span class="insight-row-val ${speedup.totalWrong > 500 ? 'bad' : speedup.totalWrong > 200 ? 'warn' : 'good'}">${speedup.totalWrong.toLocaleString()}</span>
-    </div>
-    <div class="insight-row">
-      <span class="insight-row-label">Extra days added by mistakes (all levels)</span>
-      <span class="insight-row-val warn">${fmtDays(speedup.mistakeDaysLostPerLevel * _stats.done.length)}</span>
-    </div>
-    <div class="insight-row">
-      <span class="insight-row-label">Extra delay per level from mistakes</span>
-      <span class="insight-row-val ${speedup.mistakeDaysLostPerLevel > 3 ? 'bad' : speedup.mistakeDaysLostPerLevel > 1 ? 'warn' : 'good'}">${fmtDays(speedup.mistakeDaysLostPerLevel)}</span>
-    </div>
-    <div class="insight-row">
-      <span class="insight-row-label">Items answered wrong 4+ times (leeches)</span>
-      <span class="insight-row-val ${speedup.leechCount > 50 ? 'bad' : speedup.leechCount > 20 ? 'warn' : 'good'}">${speedup.leechCount}</span>
-    </div>
-    <div class="insight-row">
-      <span class="insight-row-label">Days saved across ${left} levels with 100% accuracy</span>
-      <span class="insight-row-val good">${fmtDays(speedup.mistakeSavingTotal)}</span>
+    <!-- Lever 2: Accuracy -->
+    <div class="card gold">
+      <div class="eyebrow">Lever 2 — Get reviews right</div>
+      <p class="lever-intro">
+        Every wrong answer bumps an item back one SRS stage, adding ~20h before it's due again.
+        For radicals and kanji — which directly gate your level-up — each mistake is a direct delay.
+      </p>
+      <div class="acc-display">
+        <div class="acc-circle" style="--acc-color:${accColor}">
+          <div class="acc-number" style="color:${accColor}">${speedup.accuracy.toFixed(1)}%</div>
+          <div class="acc-label">accuracy</div>
+        </div>
+        <div class="acc-detail">
+          <p class="acc-tip">${accTip}</p>
+          <div class="insight-row">
+            <span class="insight-row-label">Total reviews on your current levels</span>
+            <span class="insight-row-val">${speedup.total.toLocaleString()}</span>
+          </div>
+          <div class="insight-row">
+            <span class="insight-row-label">Incorrect answers</span>
+            <span class="insight-row-val ${speedup.accuracy < 75 ? 'bad' : 'warn'}">${speedup.incorrect.toLocaleString()}</span>
+          </div>
+          <div class="insight-row">
+            <span class="insight-row-label">Extra days added per level by mistakes</span>
+            <span class="insight-row-val ${speedup.extraDaysPerLevel > 3 ? 'bad' : speedup.extraDaysPerLevel > 1 ? 'warn' : 'good'}">${fmtDays(speedup.extraDaysPerLevel)}</span>
+          </div>
+          <div class="insight-row">
+            <span class="insight-row-label">Level 60 if you got everything right</span>
+            <span class="insight-row-val good">${fmtDate(noMistakeDate)}</span>
+          </div>
+        </div>
+      </div>
+      <div class="lever-tip">
+        💡 Before reviews, spend 10 seconds recalling the item meaning and reading.
+        Leeches (items you keep getting wrong) are worth drilling separately — the WaniKani
+        self-study quiz is good for this.
+      </div>
     </div>
   `;
 
@@ -258,15 +268,26 @@ async function fetchWK(token) {
     url = j.pages?.next_url || null;
   }
 
+  // Fetch review stats only for current run levels — fast, single request
+  const currentLevel = user.data.current_level;
+  const levelNums = Array.from({ length: currentLevel }, (_, i) => i + 1).join(',');
   setLoadingMsg('Fetching review statistics...');
-  url = 'https://api.wanikani.com/v2/review_statistics';
+  const rsRes = await fetch(
+    `https://api.wanikani.com/v2/review_statistics?levels=${levelNums}`,
+    { headers }
+  );
   let reviewStats = [];
-  while (url) {
-    const r = await fetch(url, { headers });
-    if (!r.ok) throw new Error(`API error ${r.status}`);
-    const j = await r.json();
-    reviewStats = reviewStats.concat(j.data);
-    url = j.pages?.next_url || null;
+  if (rsRes.ok) {
+    const rsJson = await rsRes.json();
+    reviewStats = rsJson.data || [];
+    // Handle pagination just in case (unlikely at level 6 but safe)
+    let next = rsJson.pages?.next_url || null;
+    while (next) {
+      const r = await fetch(next, { headers });
+      const j = await r.json();
+      reviewStats = reviewStats.concat(j.data);
+      next = j.pages?.next_url || null;
+    }
   }
 
   return { user, progressions, reviewStats };
@@ -294,13 +315,13 @@ function getDemoData() {
     });
   }
   const reviewStats = [];
-  for (let i = 0; i < 400; i++) {
-    const wrong = Math.floor(Math.random() * 8);
+  for (let i = 0; i < 120; i++) {
+    const wrong = Math.floor(Math.random() * 6);
     reviewStats.push({
       data: {
-        meaning_correct: 5 + Math.floor(Math.random() * 20),
+        meaning_correct: 5 + Math.floor(Math.random() * 15),
         meaning_incorrect: Math.floor(wrong / 2),
-        reading_correct: 5 + Math.floor(Math.random() * 20),
+        reading_correct: 5 + Math.floor(Math.random() * 15),
         reading_incorrect: wrong - Math.floor(wrong / 2),
       }
     });
@@ -366,7 +387,7 @@ function render(data, isDemo) {
       </div>`;
 
   if (data.reviewStats && data.reviewStats.length > 0) {
-    const speedup = computeSpeedup(data.reviewStats, stats);
+    const speedup = computeSpeedup(data.reviewStats);
     renderSpeedup(speedup);
   }
 
