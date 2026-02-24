@@ -18,26 +18,44 @@ function relDays(d) {
 
 // ── stats computation ──────────────────────────────────────────────────────
 
-// If the user has ever reset, there will be duplicate level numbers in their
-// progressions (e.g. two level 1s, two level 2s, etc.). We keep only the most
-// recently started progression for each level so we analyse the current run only.
-function getLatestRun(progressions) {
-  const byLevel = {};
-  for (const p of progressions) {
-    const lvl = p.data.level;
-    if (!byLevel[lvl] || new Date(p.data.started_at) > new Date(byLevel[lvl].data.started_at)) {
-      byLevel[lvl] = p;
+// Finds the start date of the most recent continuous run.
+// A reset is detected when a progression's started_at is LATER than a
+// higher-numbered level's started_at — meaning the level order restarted.
+// We find the most recent such restart and discard everything before it.
+function getCurrentRunStart(progressions) {
+  if (!progressions.length) return null;
+
+  const sorted = [...progressions].sort(
+    (a, b) => new Date(a.data.started_at) - new Date(b.data.started_at)
+  );
+
+  let runStartDate = new Date(sorted[0].data.started_at);
+  let prevLevel = 0;
+
+  for (const p of sorted) {
+    if (p.data.level <= prevLevel && p.data.level <= 5) {
+      runStartDate = new Date(p.data.started_at);
     }
+    prevLevel = p.data.level;
   }
-  return Object.values(byLevel).sort((a, b) => a.data.level - b.data.level);
+
+  return runStartDate;
 }
 
 function computeStats(progressions, currentLevel) {
-  const latest = getLatestRun(progressions);
-  const done = latest.filter(p =>
+  const runStart = getCurrentRunStart(progressions);
+
+  const currentRun = progressions.filter(p =>
+    new Date(p.data.started_at) >= runStart
+  );
+
+  const done = currentRun.filter(p =>
     p.data.passed_at && !p.data.abandoned_at && p.data.level < currentLevel
   );
+
   if (done.length < 2) return null;
+
+  done.sort((a, b) => a.data.level - b.data.level);
 
   const durs = done.map(p =>
     (new Date(p.data.passed_at) - new Date(p.data.started_at)) / 864e5
@@ -118,7 +136,6 @@ function render(data, isDemo) {
     return;
   }
 
-  // stats grid
   document.getElementById('stats-grid').innerHTML = [
     [lvl, 'Current Level'],
     [stats.done.length, 'Levels Passed'],
@@ -130,13 +147,9 @@ function render(data, isDemo) {
       <div class="stat-lbl">${l}</div>
     </div>`).join('');
 
-  // pace pills
   renderPills();
-
-  // prediction
   updatePrediction();
 
-  // level chart
   const shown = stats.done.slice(-30);
   const maxD = Math.max(...stats.durs);
 
@@ -163,7 +176,6 @@ function render(data, isDemo) {
         <div class="bar-meta" style="font-style:italic;color:var(--muted)">in progress</div>
       </div>`;
 
-  // show results
   document.getElementById('input-card').style.display = 'none';
   document.getElementById('loading').style.display = 'none';
   document.getElementById('results').style.display = 'block';
@@ -230,7 +242,7 @@ function setPace(p) {
   updatePrediction();
 }
 
-// ── main actions ──────────────────────────────────────────────────────────
+// ── main actions ───────────────────────────────────────────────────────────
 async function run() {
   const token = document.getElementById('token-input').value.trim();
   if (!token) { showError('Please enter your API key.'); return; }
