@@ -3,10 +3,14 @@ let _stats = null;
 let _currentLevel = 0;
 let _activePace = 'median';
 
+// ── review windows ─────────────────────────────────────────────────────────
+const REVIEW_WINDOWS = [9, 18]; // 9am and 6pm (24h)
+
 // ── helpers ────────────────────────────────────────────────────────────────
 const addDays = (d, n) => new Date(d.getTime() + n * 864e5);
 const fmtDate = d => d.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 const fmtShort = d => new Date(d).toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+const fmtDateTime = d => d.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
 
 function relDays(d) {
   const diff = Math.round((d - Date.now()) / 864e5);
@@ -22,16 +26,43 @@ function fmtDays(d) {
   return `${Math.round(d)}d`;
 }
 
-// ── SRS constants ──────────────────────────────────────────────────────────
-// Minimum time per level assuming perfect windows + 0 mistakes
-// Radicals: 4h+8h+23h+47h = 82h to Guru
-// Kanji unlocked after radicals Guru, same ladder = 82h more
-// But ~50% of kanji are available from lesson start, so kanji ladder
-// runs in parallel. WK's stated minimum for fast levels = ~3d 10h
-const MINIMUM_DAYS_PER_LEVEL = 3.42;
+// ── SRS intervals ──────────────────────────────────────────────────────────
+// Hours to next review per stage (0-indexed: stage 0 = Apprentice 1)
+const SRS_INTERVALS_H = [4, 8, 23, 47, 167, 335, 719, 2879];
 
-// SRS intervals in hours per stage
-const SRS_INTERVALS = [4, 8, 23, 47]; // App1→2, App2→3, App3→4, App4→Guru
+// Given a date/time when an item becomes available, find the next
+// review window (9am or 6pm) on or after that time.
+function nextWindow(availableAt) {
+  const d = new Date(availableAt);
+  const hours = REVIEW_WINDOWS;
+
+  // Try same day windows first, then next days
+  for (let dayOffset = 0; dayOffset <= 14; dayOffset++) {
+    const candidate = new Date(d);
+    candidate.setDate(candidate.getDate() + dayOffset);
+    for (const h of hours) {
+      candidate.setHours(h, 0, 0, 0);
+      if (candidate > d) return new Date(candidate);
+    }
+  }
+  return d; // fallback
+}
+
+// Simulate an item through the SRS from its current stage until Guru (stage 4)
+// Returns the date it reaches Guru given window-based reviews
+function simulateToGuru(startDate, currentStage) {
+  let reviewDate = new Date(startDate);
+  let stage = currentStage;
+
+  while (stage < 4) {
+    // Item becomes available after interval
+    const availableAt = new Date(reviewDate.getTime() + SRS_INTERVALS_H[stage] * 3600000);
+    // Next window on or after available time
+    reviewDate = nextWindow(availableAt);
+    stage++;
+  }
+  return reviewDate; // date when item reaches Guru
+}
 
 // ── stats computation ──────────────────────────────────────────────────────
 function getCurrentRunStart(progressions) {
@@ -76,6 +107,102 @@ function computeStats(progressions, currentLevel) {
   return { avg, median, fast, slow, recent, durs, sorted, done };
 }
 
+// ── window-based level time ────────────────────────────────────────────────
+// Calculate how many days a level takes if you do reviews at 9am and 6pm only.
+// Simulates the critical path: radicals → Guru, then kanji → Guru (90% needed).
+function calcWindowLevelDays(lessonTime) {
+  // Simulate a radical going from lesson → Guru at window-based reviews
+  // Stage 0 = just learned (Apprentice 1)
+  const radicalGuruDate = simulateToGuru(lessonTime, 0);
+
+  // Kanji unlocked after radicals Guru. Simulate kanji from that point.
+  const kanjiGuruDate = simulateToGuru(radicalGuruDate, 0);
+
+  // Level-up happens when 90% of kanji reach Guru.
+  // The last kanji to Guru determines level-up time.
+  // Simplification: use the single-path simulation as the critical path.
+  const levelUpDate = kanjiGuruDate;
+  const days = (levelUpDate - lessonTime) / 864e5;
+  return { days, levelUpDate };
+}
+
+// ── next level prediction ──────────────────────────────────────────────────
+function computeNextLevel(assignments) {
+  const now = new Date();
+
+  // Filter to current level radicals and kanji in Apprentice stages (0-3)
+  const blocking = assignments.filter(a => {
+    const d = a.data;
+    return (d.subject_type === 'radical' || d.subject_type === 'kanji') &&
+           d.srs_stage < 4 && // not yet Guru
+           !d.burned_at &&
+           d.started_at; // has been started (not just available)
+  });
+
+  if (blocking.length === 0) {
+    // All radicals/kanji are Guru+ — level up is imminent (just needs review session)
+    return {
+      levelUpDate: nextWindow(now),
+      blockingCount: 0,
+      criticalItem: null,
+    };
+  }
+
+  // For each blocking item, simulate when it reaches Guru
+  const guruDates = blocking.map(a => {
+    const d = a.data;
+    const stage = d.srs_stage; // 0=App1, 1=App2, 2=App3, 3=App4
+    // Available at = when the next review is due
+    const availableAt = d.available_at ? new Date(d.available_at) : now;
+    // If already available, use now
+    const startFrom = availableAt <= now ? now : availableAt;
+    // Simulate from current stage (already at this stage, just needs review)
+    const guruDate = simulateToGuru(startFrom, stage);
+    return { guruDate, stage, type: d.subject_type, availableAt };
+  });
+
+  // Sort by guru date descending — the last item to Guru determines level-up
+  guruDates.sort((a, b) => b.guruDate - a.guruDate);
+
+  // Level-up needs 90% of kanji at Guru. Find the date when 90% are done.
+  const kanjiItems = guruDates.filter(g => g.type === 'kanji');
+  const radicalItems = guruDates.filter(g => g.type === 'radical');
+
+  let levelUpDate;
+  if (kanjiItems.length > 0) {
+    // 90th percentile of kanji guru dates
+    const idx = Math.floor(kanjiItems.length * 0.1); // 10% from end = 90th percentile
+    const sortedKanji = [...kanjiItems].sort((a, b) => a.guruDate - b.guruDate);
+    levelUpDate = sortedKanji[Math.max(0, sortedKanji.length - 1 - idx)].guruDate;
+  } else {
+    // Only radicals blocking — use last radical
+    levelUpDate = guruDates[0].guruDate;
+  }
+
+  const criticalItem = guruDates[0]; // slowest item
+
+  return {
+    levelUpDate,
+    blockingCount: blocking.length,
+    criticalItem,
+    stageBreakdown: [0,1,2,3].map(s => ({
+      stage: s,
+      count: blocking.filter(a => a.data.srs_stage === s).length,
+      label: ['App 1','App 2','App 3','App 4'][s]
+    })).filter(s => s.count > 0)
+  };
+}
+
+// ── window-based road to 60 ────────────────────────────────────────────────
+function calcWindowRoadTo60() {
+  const left = 60 - _currentLevel;
+  // Use next 9am as the start of each level (lesson time)
+  const firstLesson = nextWindow(new Date());
+  const { days: windowDaysPerLevel } = calcWindowLevelDays(firstLesson);
+  const windowDate = addDays(new Date(), left * windowDaysPerLevel);
+  return { windowDaysPerLevel, windowDate };
+}
+
 // ── speedup analysis ───────────────────────────────────────────────────────
 function computeSpeedup(reviewStats) {
   let correct = 0, incorrect = 0;
@@ -86,43 +213,75 @@ function computeSpeedup(reviewStats) {
   const total    = correct + incorrect;
   const accuracy = total > 0 ? (correct / total) * 100 : 100;
 
-  // Each wrong answer costs one extra SRS interval on average
-  // Average interval across all 4 stages = (4+8+23+47)/4 = 20.5h
-  const avgIntervalHours = 20.5;
+  const avgIntervalHours   = 20.5;
+  const estReviewsPerLevel = 100;
+  const incorrectRate      = total > 0 ? incorrect / total : 0;
+  const extraHoursPerLevel = incorrectRate * estReviewsPerLevel * avgIntervalHours;
+  const extraDaysPerLevel  = extraHoursPerLevel / 24;
 
-  // Extra hours per level due to mistakes:
-  // incorrectRate * totalReviewsPerLevel * avgIntervalHours
-  // A typical level has ~100 reviews (radicals + kanji + vocab)
-  const estReviewsPerLevel  = 100;
-  const incorrectRate       = total > 0 ? incorrect / total : 0;
-  const extraHoursPerLevel  = incorrectRate * estReviewsPerLevel * avgIntervalHours;
-  const extraDaysPerLevel   = extraHoursPerLevel / 24;
-
-  // Window loss = actual median minus theoretical minimum
-  const windowLostPerLevel  = Math.max(0, _stats.median - MINIMUM_DAYS_PER_LEVEL);
-
-  // Perfect scenario = minimum days (window perfect + no mistakes)
-  // Realistic best = minimum + small buffer for sleep (can't always hit 4h window)
-  const sleepBufferDays     = 0.5; // ~12h buffer for sleep schedule
-  const realisticBestDays   = MINIMUM_DAYS_PER_LEVEL + sleepBufferDays;
+  const windowLostPerLevel = Math.max(0, _stats.median - calcWindowRoadTo60().windowDaysPerLevel);
 
   return {
-    accuracy,
-    total,
-    incorrect,
-    extraDaysPerLevel,
-    windowLostPerLevel,
-    realisticBestDays,
+    accuracy, total, incorrect, extraDaysPerLevel, windowLostPerLevel,
   };
+}
+
+// ── render next level ──────────────────────────────────────────────────────
+function renderNextLevel(nextLevel) {
+  const { levelUpDate, blockingCount, criticalItem, stageBreakdown } = nextLevel;
+  const now = new Date();
+  const daysUntil = (levelUpDate - now) / 864e5;
+
+  const stageHtml = stageBreakdown ? stageBreakdown.map(s => `
+    <div class="stage-pip">
+      <div class="stage-pip-count">${s.count}</div>
+      <div class="stage-pip-label">${s.label}</div>
+    </div>
+  `).join('') : '';
+
+  document.getElementById('next-level-content').innerHTML = `
+    <div class="next-level-grid">
+      <div class="next-level-date">
+        <div class="proj-label">Level ${_currentLevel + 1} unlocks</div>
+        <div class="next-date-big">${fmtDateTime(levelUpDate)}</div>
+        <div class="proj-rel">${fmtDays(Math.max(0, daysUntil))} from now</div>
+      </div>
+      <div class="next-level-meta">
+        <div class="insight-row">
+          <span class="insight-row-label">Items still blocking level-up</span>
+          <span class="insight-row-val ${blockingCount > 20 ? 'bad' : blockingCount > 5 ? 'warn' : 'good'}">${blockingCount}</span>
+        </div>
+        ${stageBreakdown && stageBreakdown.length ? `
+        <div class="insight-row" style="align-items:center">
+          <span class="insight-row-label">Breakdown by SRS stage</span>
+          <div class="stage-pips">${stageHtml}</div>
+        </div>` : ''}
+        ${criticalItem ? `
+        <div class="insight-row">
+          <span class="insight-row-label">Slowest item reaches Guru</span>
+          <span class="insight-row-val warn">${fmtDateTime(criticalItem.guruDate)}</span>
+        </div>` : ''}
+        <div class="insight-row">
+          <span class="insight-row-label">Based on review windows</span>
+          <span class="insight-row-val" style="font-size:12px;font-family:'DM Mono',monospace">${REVIEW_WINDOWS.map(h => `${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`).join(' & ')}</span>
+        </div>
+      </div>
+    </div>
+    <div class="lever-tip">
+      💡 This assumes you do your reviews at every ${REVIEW_WINDOWS.map(h => `${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`).join(' and ')} window without missing any.
+      Missing even one window pushes this date back by hours.
+    </div>
+  `;
+
+  document.getElementById('next-level-section').style.display = 'block';
 }
 
 // ── render speedup ─────────────────────────────────────────────────────────
 function renderSpeedup(speedup) {
-  const left         = 60 - _currentLevel;
+  const left = 60 - _currentLevel;
   const currentDate  = addDays(new Date(), left * _stats.median);
-  const perfectDate  = addDays(new Date(), left * MINIMUM_DAYS_PER_LEVEL);
-  const realistDate  = addDays(new Date(), left * speedup.realisticBestDays);
-  const noMistakeDate = addDays(new Date(), left * Math.max(MINIMUM_DAYS_PER_LEVEL, _stats.median - speedup.extraDaysPerLevel));
+  const { windowDaysPerLevel, windowDate } = calcWindowRoadTo60();
+  const noMistakeDate = addDays(new Date(), left * Math.max(windowDaysPerLevel, _stats.median - speedup.extraDaysPerLevel));
 
   const accColor = speedup.accuracy >= 90 ? '#4a7c59' : speedup.accuracy >= 75 ? 'var(--gold)' : 'var(--red)';
   const accTip   = speedup.accuracy >= 90
@@ -135,10 +294,9 @@ function renderSpeedup(speedup) {
     <div class="speedup-header">
       <div class="eyebrow" style="color:var(--gold);margin-bottom:4px">How to go faster</div>
       <h2 class="speedup-title">Your road to Level 60</h2>
-      <p class="speedup-sub">Two levers: review timing and accuracy</p>
+      <p class="speedup-sub">9am & 6pm review windows · two levers</p>
     </div>
 
-    <!-- Current vs best projections -->
     <div class="proj-grid">
       <div class="proj-box current">
         <div class="proj-label">At your current pace</div>
@@ -146,67 +304,79 @@ function renderSpeedup(speedup) {
         <div class="proj-rel">${relDays(currentDate)}</div>
         <div class="proj-detail">${fmtDays(_stats.median)} / level</div>
       </div>
-      <div class="proj-box best">
-        <div class="proj-label">Perfect windows + accuracy</div>
-        <div class="proj-date">${fmtDate(perfectDate)}</div>
-        <div class="proj-rel">${relDays(perfectDate)}</div>
-        <div class="proj-detail">${fmtDays(MINIMUM_DAYS_PER_LEVEL)} / level (theoretical min)</div>
-      </div>
       <div class="proj-box realistic">
-        <div class="proj-label">Realistic best case</div>
-        <div class="proj-date">${fmtDate(realistDate)}</div>
-        <div class="proj-rel">${relDays(realistDate)}</div>
-        <div class="proj-detail">${fmtDays(speedup.realisticBestDays)} / level (min + sleep buffer)</div>
+        <div class="proj-label">9am & 6pm windows only</div>
+        <div class="proj-date">${fmtDate(windowDate)}</div>
+        <div class="proj-rel">${relDays(windowDate)}</div>
+        <div class="proj-detail">${fmtDays(windowDaysPerLevel)} / level (simulated)</div>
+      </div>
+      <div class="proj-box best">
+        <div class="proj-label">Windows + perfect accuracy</div>
+        <div class="proj-date">${fmtDate(noMistakeDate)}</div>
+        <div class="proj-rel">${relDays(noMistakeDate)}</div>
+        <div class="proj-detail">${fmtDays(windowDaysPerLevel)} / level + no mistakes</div>
       </div>
     </div>
 
-    <!-- Lever 1: Windows -->
     <div class="card gold">
       <div class="eyebrow">Lever 1 — Hit every review window</div>
       <p class="lever-intro">
-        WaniKani unlocks reviews at fixed intervals. The moment a window opens,
-        the clock stops — but if you miss it, your item just waits until next time you log in.
-        The early windows matter most.
+        Your two daily windows are 9am and 6pm. The SRS intervals are fixed — miss a window
+        and the item waits until your next slot. The 4h Apprentice 1 window is the most critical:
+        do your lessons at 9am, catch the 4h review by 1pm, then it flows into the 6pm window naturally.
       </p>
       <div class="srs-ladder">
-        ${SRS_INTERVALS.map((h, i) => `
-          <div class="srs-step${i === 0 ? ' highlight' : ''}">
-            <div class="srs-step-stage">App ${i + 1}→${i + 2 <= 4 ? i + 2 : 'Guru'}</div>
-            <div class="srs-step-time">${h}h</div>
-            ${i === 0 ? '<div class="srs-step-note">most critical</div>' : ''}
-          </div>
-          ${i < SRS_INTERVALS.length - 1 ? '<div class="srs-arrow">→</div>' : ''}
-        `).join('')}
+        <div class="srs-step highlight">
+          <div class="srs-step-stage">App 1→2</div>
+          <div class="srs-step-time">4h</div>
+          <div class="srs-step-note">most critical</div>
+        </div>
+        <div class="srs-arrow">→</div>
+        <div class="srs-step">
+          <div class="srs-step-stage">App 2→3</div>
+          <div class="srs-step-time">8h</div>
+        </div>
+        <div class="srs-arrow">→</div>
+        <div class="srs-step">
+          <div class="srs-step-stage">App 3→4</div>
+          <div class="srs-step-time">23h</div>
+        </div>
+        <div class="srs-arrow">→</div>
+        <div class="srs-step">
+          <div class="srs-step-stage">App 4→Guru</div>
+          <div class="srs-step-time">47h</div>
+        </div>
         <div class="srs-arrow">→</div>
         <div class="srs-step" style="border-color:var(--gold)">
           <div class="srs-step-stage">Guru ✓</div>
-          <div class="srs-step-time" style="color:var(--gold)">82h</div>
+          <div class="srs-step-time" style="color:var(--gold)">~5d</div>
         </div>
       </div>
       <div class="insight-row">
-        <span class="insight-row-label">Your median vs theoretical minimum</span>
-        <span class="insight-row-val">${fmtDays(_stats.median)} vs ${fmtDays(MINIMUM_DAYS_PER_LEVEL)}</span>
+        <span class="insight-row-label">Your median vs 9am/6pm window pace</span>
+        <span class="insight-row-val">${fmtDays(_stats.median)} vs ${fmtDays(windowDaysPerLevel)}</span>
       </div>
       <div class="insight-row">
-        <span class="insight-row-label">Days lost per level to missed windows</span>
+        <span class="insight-row-label">Days saved per level on window schedule</span>
         <span class="insight-row-val ${speedup.windowLostPerLevel > 7 ? 'bad' : speedup.windowLostPerLevel > 3 ? 'warn' : 'good'}">${fmtDays(speedup.windowLostPerLevel)}</span>
       </div>
       <div class="insight-row">
-        <span class="insight-row-label">Time saved across ${left} remaining levels</span>
+        <span class="insight-row-label">Total time saved across ${left} remaining levels</span>
         <span class="insight-row-val good">${fmtDays(speedup.windowLostPerLevel * left)}</span>
       </div>
       <div class="lever-tip">
-        💡 Set a reminder for ~4 hours after your daily lessons to catch that first Apprentice window.
-        Missing it by even a few hours cascades into losing a full day.
+        💡 Do lessons at 9am. The 4h Apprentice 1 review will be due by 1pm — do it then.
+        It'll be due again around midnight, but catching it at the 6pm window the next day
+        still keeps you on the fast track. Consistency beats perfection.
       </div>
     </div>
 
-    <!-- Lever 2: Accuracy -->
     <div class="card gold">
       <div class="eyebrow">Lever 2 — Get reviews right</div>
       <p class="lever-intro">
-        Every wrong answer bumps an item back one SRS stage, adding ~20h before it's due again.
-        For radicals and kanji — which directly gate your level-up — each mistake is a direct delay.
+        Every wrong answer bumps an item back one SRS stage, adding ~20h before it's reviewed again
+        and potentially pushing it past your next window slot. For radicals and kanji that gate
+        your level-up, each mistake is a direct delay.
       </p>
       <div class="acc-display">
         <div class="acc-circle" style="--acc-color:${accColor}">
@@ -216,7 +386,7 @@ function renderSpeedup(speedup) {
         <div class="acc-detail">
           <p class="acc-tip">${accTip}</p>
           <div class="insight-row">
-            <span class="insight-row-label">Total reviews on your current levels</span>
+            <span class="insight-row-label">Total reviews (current levels)</span>
             <span class="insight-row-val">${speedup.total.toLocaleString()}</span>
           </div>
           <div class="insight-row">
@@ -224,19 +394,19 @@ function renderSpeedup(speedup) {
             <span class="insight-row-val ${speedup.accuracy < 75 ? 'bad' : 'warn'}">${speedup.incorrect.toLocaleString()}</span>
           </div>
           <div class="insight-row">
-            <span class="insight-row-label">Extra days added per level by mistakes</span>
+            <span class="insight-row-label">Extra days per level from mistakes</span>
             <span class="insight-row-val ${speedup.extraDaysPerLevel > 3 ? 'bad' : speedup.extraDaysPerLevel > 1 ? 'warn' : 'good'}">${fmtDays(speedup.extraDaysPerLevel)}</span>
           </div>
           <div class="insight-row">
-            <span class="insight-row-label">Level 60 if you got everything right</span>
+            <span class="insight-row-label">Level 60 on windows + perfect accuracy</span>
             <span class="insight-row-val good">${fmtDate(noMistakeDate)}</span>
           </div>
         </div>
       </div>
       <div class="lever-tip">
-        💡 Before reviews, spend 10 seconds recalling the item meaning and reading.
-        Leeches (items you keep getting wrong) are worth drilling separately — the WaniKani
-        self-study quiz is good for this.
+        💡 Before each review session, take a breath and recall the item before answering.
+        Leeches (items you keep getting wrong) are worth drilling separately —
+        the WaniKani self-study quiz helps a lot with this.
       </div>
     </div>
   `;
@@ -268,7 +438,7 @@ async function fetchWK(token) {
     url = j.pages?.next_url || null;
   }
 
-  // Fetch review stats only for current run levels — fast, single request
+  // Review stats filtered to current run levels only — single fast request
   const currentLevel = user.data.current_level;
   const levelNums = Array.from({ length: currentLevel }, (_, i) => i + 1).join(',');
   setLoadingMsg('Fetching review statistics...');
@@ -280,7 +450,6 @@ async function fetchWK(token) {
   if (rsRes.ok) {
     const rsJson = await rsRes.json();
     reviewStats = rsJson.data || [];
-    // Handle pagination just in case (unlikely at level 6 but safe)
     let next = rsJson.pages?.next_url || null;
     while (next) {
       const r = await fetch(next, { headers });
@@ -290,7 +459,26 @@ async function fetchWK(token) {
     }
   }
 
-  return { user, progressions, reviewStats };
+  // Assignments for current level — to predict next level-up
+  setLoadingMsg('Fetching current assignments...');
+  const aRes = await fetch(
+    `https://api.wanikani.com/v2/assignments?levels=${currentLevel}&started=true`,
+    { headers }
+  );
+  let assignments = [];
+  if (aRes.ok) {
+    const aJson = await aRes.json();
+    assignments = aJson.data || [];
+    let next = aJson.pages?.next_url || null;
+    while (next) {
+      const r = await fetch(next, { headers });
+      const j = await r.json();
+      assignments = assignments.concat(j.data);
+      next = j.pages?.next_url || null;
+    }
+  }
+
+  return { user, progressions, reviewStats, assignments };
 }
 
 // ── demo data ──────────────────────────────────────────────────────────────
@@ -326,10 +514,29 @@ function getDemoData() {
       }
     });
   }
+  // Fake assignments — mix of stages blocking level-up
+  const assignments = [];
+  const types = ['radical','radical','kanji','kanji','kanji','kanji','kanji'];
+  const now = new Date();
+  for (let i = 0; i < 12; i++) {
+    const stage = Math.floor(Math.random() * 4);
+    const hoursAgo = Math.random() * 20;
+    const availableAt = new Date(now.getTime() + (Math.random() * 30 - 10) * 3600000);
+    assignments.push({
+      data: {
+        subject_type: types[i % types.length],
+        srs_stage: stage,
+        started_at: new Date(now.getTime() - hoursAgo * 3600000).toISOString(),
+        available_at: availableAt.toISOString(),
+        burned_at: null,
+      }
+    });
+  }
   return {
     user: { data: { current_level: 32, username: 'demo_user' } },
     progressions: p,
-    reviewStats
+    reviewStats,
+    assignments
   };
 }
 
@@ -386,6 +593,13 @@ function render(data, isDemo) {
         <div class="bar-meta" style="font-style:italic;color:var(--muted)">in progress</div>
       </div>`;
 
+  // Next level prediction
+  if (data.assignments && data.assignments.length > 0) {
+    const nextLevel = computeNextLevel(data.assignments);
+    renderNextLevel(nextLevel);
+  }
+
+  // Speedup analysis
   if (data.reviewStats && data.reviewStats.length > 0) {
     const speedup = computeSpeedup(data.reviewStats);
     renderSpeedup(speedup);
@@ -483,6 +697,7 @@ function reset() {
   document.getElementById('results').style.display = 'none';
   document.getElementById('reset-btn').style.display = 'none';
   document.getElementById('speedup-section').style.display = 'none';
+  document.getElementById('next-level-section').style.display = 'none';
   const note = document.querySelector('#results .demo-note');
   if (note) note.remove();
   _stats = null;
