@@ -4,6 +4,8 @@ A clean, lightweight tool that uses your WaniKani study history to forecast when
 
 ![WaniKani Level 60 Predictor](https://img.shields.io/badge/WaniKani-Level%2060%20Predictor-c0392b?style=flat-square)
 
+Vibe-coded with Claude. Using for personal use.
+
 ---
 
 ## What it does
