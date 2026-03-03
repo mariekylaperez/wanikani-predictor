@@ -116,62 +116,56 @@ function calcWindowRoadTo60() {
 function computeNextLevel(assignments) {
   const now = new Date();
 
-  const relevant = assignments.filter(a => {
-    const d = a.data;
-    return (d.subject_type === 'radical' || d.subject_type === 'kanji') &&
-           !d.burned_at &&
-           d.srs_stage < 4;
-  });
+  const allKanji    = assignments.filter(a => a.data.subject_type === 'kanji' && !a.data.burned_at);
+  const allRadicals = assignments.filter(a => a.data.subject_type === 'radical' && !a.data.burned_at);
 
-  if (relevant.length === 0) {
+  const totalKanji  = allKanji.length;
+  const kanjiAtGuru = allKanji.filter(a => a.data.srs_stage >= 4).length;
+  const blockingKanji    = allKanji.filter(a => a.data.srs_stage < 4);
+  const blockingRadicals = allRadicals.filter(a => a.data.srs_stage < 4);
+
+  if (blockingKanji.length === 0) {
     return {
       levelUpDate: nextWindow(now),
       blockingCount: 0,
       imminent: true,
-      stageBreakdown: []
+      stageBreakdown: [],
+      kanjiAtGuru,
+      totalKanji,
     };
   }
 
-  const guruDates = relevant.map(a => {
+  // Simulate every blocking kanji to Guru — level up when the LAST one hits
+  const kanjiGuruDates = blockingKanji.map(a => {
     const d = a.data;
     if (!d.started_at) {
-      const lessonAt = nextWindow(now);
-      const guruDate = simulateToGuru(lessonAt, 0);
-      return { guruDate, stage: -1, type: d.subject_type, unstarted: true };
+      return simulateToGuru(nextWindow(now), 0);
     }
-    const stage = d.srs_stage;
     const availableAt = d.available_at ? new Date(d.available_at) : now;
-    const startFrom = availableAt <= now ? now : availableAt;
-    const guruDate = simulateToGuru(startFrom, stage);
-    return { guruDate, stage, type: d.subject_type, unstarted: false };
+    const startFrom   = availableAt <= now ? now : availableAt;
+    return simulateToGuru(startFrom, d.srs_stage);
   });
 
-  guruDates.sort((a, b) => b.guruDate - a.guruDate);
+  kanjiGuruDates.sort((a, b) => a - b);
+  const levelUpDate = kanjiGuruDates[kanjiGuruDates.length - 1];
 
-  const kanjiItems = guruDates.filter(g => g.type === 'kanji');
-
-  let levelUpDate;
-  if (kanjiItems.length > 0) {
-    const sortedKanji = [...kanjiItems].sort((a, b) => a.guruDate - b.guruDate);
-    const idx = Math.max(0, sortedKanji.length - 1 - Math.floor(sortedKanji.length * 0.1));
-    levelUpDate = sortedKanji[idx].guruDate;
-  } else {
-    levelUpDate = guruDates[0].guruDate;
-  }
-
-  const unstartedCount = relevant.filter(a => !a.data.started_at).length;
+  const blocking = [...blockingRadicals, ...blockingKanji];
+  const unstartedCount = blocking.filter(a => !a.data.started_at).length;
 
   return {
     levelUpDate,
-    blockingCount: relevant.length,
+    blockingCount: blockingKanji.length,
     imminent: false,
-    criticalItem: guruDates[0],
+    criticalItem: { guruDate: levelUpDate },
     unstartedCount,
+    kanjiAtGuru,
+    totalKanji,
+    kanjiStillNeeded: blockingKanji.length,
     stageBreakdown: [
       { stage: -1, count: unstartedCount, label: 'Lessons' },
       ...[0, 1, 2, 3].map(s => ({
         stage: s,
-        count: relevant.filter(a => a.data.started_at && a.data.srs_stage === s).length,
+        count: blocking.filter(a => a.data.started_at && a.data.srs_stage === s).length,
         label: ['App 1', 'App 2', 'App 3', 'App 4'][s]
       }))
     ].filter(s => s.count > 0)
