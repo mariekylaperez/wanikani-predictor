@@ -116,15 +116,14 @@ function calcWindowRoadTo60() {
 function computeNextLevel(assignments) {
   const now = new Date();
 
-  const blocking = assignments.filter(a => {
+  const relevant = assignments.filter(a => {
     const d = a.data;
     return (d.subject_type === 'radical' || d.subject_type === 'kanji') &&
-           d.srs_stage < 4 &&
            !d.burned_at &&
-           d.started_at;
+           d.srs_stage < 4;
   });
 
-  if (blocking.length === 0) {
+  if (relevant.length === 0) {
     return {
       levelUpDate: nextWindow(now),
       blockingCount: 0,
@@ -133,13 +132,18 @@ function computeNextLevel(assignments) {
     };
   }
 
-  const guruDates = blocking.map(a => {
+  const guruDates = relevant.map(a => {
     const d = a.data;
+    if (!d.started_at) {
+      const lessonAt = nextWindow(now);
+      const guruDate = simulateToGuru(lessonAt, 0);
+      return { guruDate, stage: -1, type: d.subject_type, unstarted: true };
+    }
     const stage = d.srs_stage;
     const availableAt = d.available_at ? new Date(d.available_at) : now;
     const startFrom = availableAt <= now ? now : availableAt;
     const guruDate = simulateToGuru(startFrom, stage);
-    return { guruDate, stage, type: d.subject_type, availableAt };
+    return { guruDate, stage, type: d.subject_type, unstarted: false };
   });
 
   guruDates.sort((a, b) => b.guruDate - a.guruDate);
@@ -155,16 +159,22 @@ function computeNextLevel(assignments) {
     levelUpDate = guruDates[0].guruDate;
   }
 
+  const unstartedCount = relevant.filter(a => !a.data.started_at).length;
+
   return {
     levelUpDate,
-    blockingCount: blocking.length,
+    blockingCount: relevant.length,
     imminent: false,
     criticalItem: guruDates[0],
-    stageBreakdown: [0, 1, 2, 3].map(s => ({
-      stage: s,
-      count: blocking.filter(a => a.data.srs_stage === s).length,
-      label: ['App 1', 'App 2', 'App 3', 'App 4'][s]
-    })).filter(s => s.count > 0)
+    unstartedCount,
+    stageBreakdown: [
+      { stage: -1, count: unstartedCount, label: 'Lessons' },
+      ...[0, 1, 2, 3].map(s => ({
+        stage: s,
+        count: relevant.filter(a => a.data.started_at && a.data.srs_stage === s).length,
+        label: ['App 1', 'App 2', 'App 3', 'App 4'][s]
+      }))
+    ].filter(s => s.count > 0)
   };
 }
 
@@ -444,7 +454,7 @@ async function fetchWK(token) {
 
   setLoadingMsg('Fetching current assignments...');
   const aRes = await fetch(
-    `https://api.wanikani.com/v2/assignments?levels=${currentLevel}&started=true`,
+    `https://api.wanikani.com/v2/assignments?levels=${currentLevel}`,
     { headers }
   );
   let assignments = [];
@@ -461,64 +471,6 @@ async function fetchWK(token) {
   }
 
   return { user, progressions, reviewStats, assignments };
-}
-
-// ── demo data ──────────────────────────────────────────────────────────────
-function getDemoData() {
-  const p = [];
-  let d = new Date('2023-01-15');
-  for (let l = 1; l <= 32; l++) {
-    const start = new Date(d);
-    const days = l <= 10
-      ? 7 + Math.random() * 4
-      : l <= 20
-        ? 9 + Math.random() * 6
-        : 12 + Math.random() * 10;
-    d = new Date(d.getTime() + days * 864e5);
-    p.push({
-      data: {
-        level: l,
-        started_at: start.toISOString(),
-        passed_at: l < 32 ? d.toISOString() : null,
-        abandoned_at: null
-      }
-    });
-  }
-  const reviewStats = [];
-  for (let i = 0; i < 120; i++) {
-    const wrong = Math.floor(Math.random() * 6);
-    reviewStats.push({
-      data: {
-        meaning_correct: 5 + Math.floor(Math.random() * 15),
-        meaning_incorrect: Math.floor(wrong / 2),
-        reading_correct: 5 + Math.floor(Math.random() * 15),
-        reading_incorrect: wrong - Math.floor(wrong / 2),
-      }
-    });
-  }
-  const assignments = [];
-  const types = ['radical', 'radical', 'kanji', 'kanji', 'kanji', 'kanji', 'kanji'];
-  const now = new Date();
-  for (let i = 0; i < 12; i++) {
-    const stage = Math.floor(Math.random() * 4);
-    const hoursAgo = Math.random() * 20;
-    const availableAt = new Date(now.getTime() + (Math.random() * 30 - 10) * 3600000);
-    assignments.push({
-      data: {
-        subject_type: types[i % types.length],
-        srs_stage: stage,
-        started_at: new Date(now.getTime() - hoursAgo * 3600000).toISOString(),
-        available_at: availableAt.toISOString(),
-        burned_at: null,
-      }
-    });
-  }
-  return {
-    user: { data: { current_level: 32, username: 'demo_user' } },
-    progressions: p,
-    reviewStats,
-    assignments
-  };
 }
 
 // ── render ─────────────────────────────────────────────────────────────────
@@ -574,11 +526,9 @@ function render(data, isDemo) {
         <div class="bar-meta" style="font-style:italic;color:var(--muted)">in progress</div>
       </div>`;
 
-  // Next level prediction — always show
   const nextLevel = computeNextLevel(data.assignments || []);
   renderNextLevel(nextLevel);
 
-  // Speedup analysis
   if (data.reviewStats && data.reviewStats.length > 0) {
     const speedup = computeSpeedup(data.reviewStats);
     renderSpeedup(speedup);
@@ -588,13 +538,6 @@ function render(data, isDemo) {
   document.getElementById('loading').style.display = 'none';
   document.getElementById('results').style.display = 'block';
   document.getElementById('reset-btn').style.display = 'block';
-
-  if (isDemo) {
-    const note = document.createElement('p');
-    note.className = 'demo-note';
-    note.textContent = 'Showing demo data — enter your real API key for actual predictions';
-    document.getElementById('results').prepend(note);
-  }
 }
 
 // ── prediction update ──────────────────────────────────────────────────────
@@ -665,20 +608,12 @@ async function run() {
   }
 }
 
-function runDemo() {
-  clearError();
-  setLoading(true);
-  setTimeout(() => render(getDemoData(), true), 300);
-}
-
 function reset() {
   document.getElementById('input-card').style.display = 'block';
   document.getElementById('results').style.display = 'none';
   document.getElementById('reset-btn').style.display = 'none';
   document.getElementById('speedup-section').style.display = 'none';
   document.getElementById('next-level-section').style.display = 'none';
-  const note = document.querySelector('#results .demo-note');
-  if (note) note.remove();
   _stats = null;
   _activePace = 'median';
 }
